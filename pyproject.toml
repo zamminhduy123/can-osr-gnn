@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "canosr"
+version = "0.1.0"
+description = "Open-set CAN intrusion detection with pluggable graph models"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.1",
+    "torch-geometric>=2.4",
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "pyarrow>=14",
+    "scipy>=1.10",
+    "scikit-learn>=1.3",
+    "pyyaml>=6.0",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+canosr = "canosr.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["canosr*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
