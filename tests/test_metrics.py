@@ -7,6 +7,7 @@ from canosr.metrics import (
     fpr_at_tpr,
     openness,
     open_set_report,
+    oscr_score,
     summarise,
 )
 
@@ -36,6 +37,7 @@ def test_oscr_counts_known_and_unknown():
     assert report["osr_acc"] == pytest.approx(0.75)
     assert report["unknown_recall"] == pytest.approx(0.5)
     assert report["known_acc"] == 1.0
+    assert np.isnan(report["oscr"])
 
 
 def test_fpr_at_95tpr_is_monotone():
@@ -52,6 +54,26 @@ def test_closed_set_per_class_recall():
     report = closed_set_report(y_true, y_pred, n_classes=2)
     assert report["per_class_recall"]["recall_0"] == 0.5
     assert report["per_class_recall"]["recall_1"] == 1.0
+    assert report["per_class_support"] == {"n_0": 2, "n_1": 2}
+    assert report["macro_precision"] == pytest.approx(5.0 / 6.0)
+    assert report["macro_f1"] == pytest.approx(11.0 / 15.0)
+
+
+def test_oscr_score_separates_known_and_unknown():
+    y_true = np.array([0, 1, 2, 2])
+    known_pred = np.array([0, 1, 0, 1])
+    assert oscr_score(y_true, known_pred, np.array([0.1, 0.2, 0.8, 0.9]), n_known=2) == pytest.approx(1.0)
+    assert oscr_score(y_true, known_pred, np.array([0.8, 0.9, 0.1, 0.2]), n_known=2) == pytest.approx(0.0)
+    report = open_set_report(
+        y_true,
+        np.array([0, 1, 2, 0]),
+        n_known=2,
+        n_unknown_classes=1,
+        scores=np.array([0.1, 0.2, 0.8, 0.9]),
+        known_pred=known_pred,
+    )
+    assert report["oscr"] == pytest.approx(1.0)
+    assert report["osr_acc"] == pytest.approx(0.75)
 
 
 def test_summarise_ignores_nan():

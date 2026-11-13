@@ -50,8 +50,8 @@ def channel_scores(model, data, skip_id: bool = True) -> dict[str, torch.Tensor]
         "proto": proto,
         "node": node,
         "adj": adj,
-        "msp": torch.softmax(logits, dim=1).max(dim=1).values,
-        "energy": torch.logsumexp(logits, dim=1),
+        "msp": -torch.softmax(logits, dim=1).max(dim=1).values,
+        "energy": -torch.logsumexp(logits, dim=1),
         "distance": distance,
     }
 
@@ -83,10 +83,38 @@ def threshold_from_quantile(scores: torch.Tensor, quantile: float) -> float:
     return float(torch.quantile(scores.float(), quantile).item())
 
 
-def decide(scores: torch.Tensor, threshold: float, logits: torch.Tensor, n_known: int) -> torch.Tensor:
+def two_stage_score(
+    fused: torch.Tensor,
+    threshold: float,
+    logits: torch.Tensor,
+    proto_scores: torch.Tensor,
+    proto_threshold: float,
+    proto_std: float = 1.0,
+) -> torch.Tensor:
+    """Unified anomaly margin matching the two-stage decision at threshold 0.0."""
+    known = logits.argmax(dim=1)
+    scale = float(proto_std) if float(proto_std) > 0 else 1.0
+    return torch.where(
+        known == 0,
+        fused.float() - float(threshold),
+        (proto_scores.float() - float(proto_threshold)) / scale,
+    )
+
+
+def decide(
+    scores: torch.Tensor,
+    threshold: float,
+    logits: torch.Tensor,
+    n_known: int,
+    proto_scores: torch.Tensor | None = None,
+    proto_threshold: float | None = None,
+) -> torch.Tensor:
     """Unknown label is ``n_known``; otherwise argmax over known classes."""
     known = logits.argmax(dim=1)
-    unknown = scores > threshold
+    if proto_scores is not None and proto_threshold is not None:
+        unknown = torch.where(known == 0, scores > threshold, proto_scores > proto_threshold)
+    else:
+        unknown = scores > threshold
     return torch.where(unknown, torch.full_like(known, n_known), known)
 
 
@@ -119,7 +147,7 @@ def proto_scorer(normalizer: ScoreNormalizer, keys: list[str] | None = None, wei
 @register("scorer", "msp")
 def msp_scorer(normalizer: ScoreNormalizer, keys: list[str] | None = None, weights: dict[str, float] | None = None):
     def score(channels: dict[str, torch.Tensor]) -> torch.Tensor:
-        return -channels["msp"]
+        return channels["msp"]
 
     return score
 
@@ -127,7 +155,7 @@ def msp_scorer(normalizer: ScoreNormalizer, keys: list[str] | None = None, weigh
 @register("scorer", "energy")
 def energy_scorer(normalizer: ScoreNormalizer, keys: list[str] | None = None, weights: dict[str, float] | None = None):
     def score(channels: dict[str, torch.Tensor]) -> torch.Tensor:
-        return -channels["energy"]
+        return channels["energy"]
 
     return score
 

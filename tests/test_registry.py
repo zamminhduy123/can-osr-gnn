@@ -4,11 +4,13 @@ from canosr.registry import KINDS, build, names, register
 
 
 def test_expected_entries_are_registered():
+    import canosr.losses  # noqa: F401
     import canosr.models  # noqa: F401
     import canosr.scoring  # noqa: F401
 
     assert {"gatv2", "gat", "sage", "gcn", "mlp"}.issubset(set(names("encoder")))
     assert {"prototype", "linear", "none"}.issubset(set(names("head")))
+    assert {"supcon", "node_recon", "adj_recon", "ce", "focal"}.issubset(set(names("loss")))
     assert {"fused", "msp", "energy", "recon", "proto_distance"}.issubset(set(names("scorer")))
 
 

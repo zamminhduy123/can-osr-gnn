@@ -57,17 +57,30 @@ def closed_set_report(y_true: np.ndarray, y_pred: np.ndarray, n_classes: int) ->
     y_true = np.asarray(y_true)
     y_pred = np.asarray(y_pred)
     per_class = {}
-    recalls = []
+    support = {}
+    precisions, recalls, f1s = [], [], []
     for index in range(n_classes):
         mask = y_true == index
-        recall = float((y_pred[mask] == index).mean()) if mask.any() else float("nan")
+        pred_mask = y_pred == index
+        support[f"n_{index}"] = int(mask.sum())
+        if not mask.any():
+            per_class[f"recall_{index}"] = float("nan")
+            continue
+        tp = int((mask & pred_mask).sum())
+        recall = float(tp / int(mask.sum()))
+        precision = float(tp / int(pred_mask.sum())) if pred_mask.any() else 0.0
+        f1 = 2.0 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
         per_class[f"recall_{index}"] = recall
-        if not math.isnan(recall):
-            recalls.append(recall)
+        recalls.append(recall)
+        precisions.append(precision)
+        f1s.append(f1)
     return {
-        "acc": float((y_true == y_pred).mean()),
+        "acc": float((y_true == y_pred).mean()) if len(y_true) else float("nan"),
+        "macro_precision": float(np.mean(precisions)) if precisions else float("nan"),
         "macro_recall": float(np.mean(recalls)) if recalls else float("nan"),
+        "macro_f1": float(np.mean(f1s)) if f1s else float("nan"),
         "per_class_recall": per_class,
+        "per_class_support": support,
     }
 
 
@@ -77,6 +90,32 @@ def openness(n_known: int, n_unknown: int) -> float:
     return 1.0 - math.sqrt(2.0 * n_known / (n_known + n_unknown))
 
 
+def oscr_score(
+    y_true: np.ndarray,
+    known_pred: np.ndarray,
+    scores: np.ndarray,
+    n_known: int,
+) -> float:
+    """Open-Set Classification Rate (Dhamija et al. 2018): AUC of CCR vs FPR."""
+    y_true = np.asarray(y_true)
+    known_pred = np.asarray(known_pred)
+    scores = np.asarray(scores, dtype=float)
+    known_mask = y_true < n_known
+    unknown_mask = ~known_mask
+    n_k = int(known_mask.sum())
+    n_u = int(unknown_mask.sum())
+    if n_k == 0 or n_u == 0:
+        return float("nan")
+
+    order = np.argsort(scores, kind="stable")
+    is_unknown = unknown_mask[order]
+    is_correct_known = known_mask[order] & (known_pred[order] == y_true[order])
+
+    fpr = np.r_[0.0, np.cumsum(is_unknown) / n_u]
+    ccr = np.r_[0.0, np.cumsum(is_correct_known) / n_k]
+    return float(np.trapezoid(ccr, fpr) if hasattr(np, "trapezoid") else np.trapz(ccr, fpr))
+
+
 def open_set_report(
     y_true: np.ndarray,
     y_pred: np.ndarray,
@@ -84,6 +123,7 @@ def open_set_report(
     n_unknown_classes: int,
     scores: np.ndarray | None = None,
     threshold: float | None = None,
+    known_pred: np.ndarray | None = None,
 ) -> dict[str, Any]:
     """y_true uses ``n_known`` for the unknown class."""
     y_true = np.asarray(y_true)
@@ -97,7 +137,7 @@ def open_set_report(
 
     report: dict[str, Any] = {
         "osr_acc": (correct_known + correct_unknown) / max(total, 1),
-        "oscr": (correct_known + correct_unknown) / max(total, 1),
+        "oscr": float("nan"),
         "openness": openness(n_known, n_unknown_classes),
         "known_acc": correct_known / max(int(known_mask.sum()), 1),
         "unknown_recall": correct_unknown / max(int(unknown_mask.sum()), 1),
@@ -107,6 +147,12 @@ def open_set_report(
 
     if scores is not None:
         binary_true = unknown_mask.astype(int)
+        report["oscr"] = oscr_score(
+            y_true,
+            y_pred if known_pred is None else known_pred,
+            scores,
+            n_known,
+        )
         report["auroc"] = _safe_auroc(binary_true, scores)
         report["aupr"] = _safe_aupr(binary_true, scores)
         report["fpr_at_95tpr"] = fpr_at_tpr(binary_true, scores, 0.95)
@@ -122,7 +168,7 @@ def open_set_report(
 
 
 def summarise(rows: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
-    """mean/std across seeds for every numeric key."""
+    """mean/std/ci95 across seeds for every numeric key."""
     keys = {k for row in rows for k, v in row.items() if isinstance(v, (int, float))}
     out: dict[str, dict[str, float]] = {}
     for key in sorted(keys):
@@ -130,9 +176,11 @@ def summarise(rows: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
         values = values[~np.isnan(values)]
         if values.size == 0:
             continue
+        std = float(values.std(ddof=1)) if values.size > 1 else 0.0
         out[key] = {
             "mean": float(values.mean()),
-            "std": float(values.std(ddof=1)) if values.size > 1 else 0.0,
+            "std": std,
+            "ci95": float(1.96 * std / math.sqrt(values.size)) if values.size > 1 else 0.0,
             "n": int(values.size),
         }
     return out

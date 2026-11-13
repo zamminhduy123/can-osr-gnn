@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GATConv, GATv2Conv, GCNConv, SAGEConv
-from torch_geometric.nn import global_add_pool
+from torch_geometric.nn import global_add_pool, global_mean_pool
 from torch_geometric.utils import to_dense_batch
 
 from .registry import build, register
@@ -109,6 +109,19 @@ class AttnReadout(nn.Module):
         return global_add_pool(x * weights, batch)
 
 
+class PoolReadout(nn.Module):
+    def __init__(self, mode: str):
+        super().__init__()
+        self.mode = mode
+
+    def forward(self, x, batch):
+        if self.mode == "add":
+            return global_add_pool(x, batch)
+        if self.mode == "mean":
+            return global_mean_pool(x, batch)
+        raise ValueError(f"unknown readout {self.mode!r}")
+
+
 # ---------------------------------------------------------------------------- heads
 
 
@@ -172,7 +185,12 @@ class GraphAE(nn.Module):
             edge_dim=edge_dim,
         )
         width = cfg.hidden * cfg.heads
-        self.readout = AttnReadout(width)
+        if cfg.readout == "attn":
+            self.readout = AttnReadout(width)
+        elif cfg.readout in ("add", "mean"):
+            self.readout = PoolReadout(cfg.readout)
+        else:
+            raise ValueError(f"unknown readout {cfg.readout!r}")
         self.projection = nn.Sequential(
             nn.Linear(width, width * 2),
             nn.GELU(),

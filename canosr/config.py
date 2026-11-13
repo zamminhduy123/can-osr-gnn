@@ -20,9 +20,11 @@ DEFAULTS: dict[str, Any] = {
         "window": 300,
         "stride": 300,
         "split_seed": 1,
+        "variants": ["fab", "mas", "ambient"],
+        "benign_source": "with_ambient",  # or "attack_only" for paper parity
         "raw_node_feat": 13,
         "edge_feat": 3,
-        "feature_version": "v1",
+        "feature_version": "v2",
     },
     "model": {
         "encoder": "gatv2",
@@ -49,11 +51,12 @@ DEFAULTS: dict[str, Any] = {
     "train": {
         "epochs": 330,
         "phase2_start": 300,
+        "phase2_mode": "joint",  # "joint" = submitted behaviour; "freeze" = head-only
         "batch_size": 512,
         "lr": 0.01,
         "lr_head": 1e-4,
         "optimizer": "adamw",
-        "weight_decay": 5e-4,
+        "weight_decay": 1e-4,
         "scheduler": "cosine",
         "grad_clip": 5.0,
         "sampler": "class_aware",
@@ -75,6 +78,7 @@ DEFAULTS: dict[str, Any] = {
         "device": "cuda",
         "amp": False,
         "force": False,
+        "limit": 0,  # 0 = all graphs; >0 subsamples each role, for smoke tests
     },
 }
 
@@ -142,7 +146,13 @@ def load_config(path: str | Path | None = None, overrides: dict[str, Any] | None
 def config_hash(cfg: Cfg) -> str:
     """Stable hash of everything that can change a number."""
     payload = cfg.to_dict()
-    payload.pop("run", None)  # device/force do not affect results
+    data_cfg = payload.get("data")
+    if isinstance(data_cfg, dict):
+        data_cfg.pop("root", None)
+    run_cfg = payload.get("run")
+    if isinstance(run_cfg, dict):
+        for key in ("device", "force", "root"):
+            run_cfg.pop(key, None)
     blob = json.dumps(payload, sort_keys=True, default=str).encode()
     return hashlib.sha256(blob).hexdigest()
 

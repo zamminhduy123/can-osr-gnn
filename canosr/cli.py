@@ -15,6 +15,7 @@ import yaml
 
 from .config import Cfg, load_config, data_root
 from .data import (
+    assert_disjoint,
     build_captures,
     build_graph_cache,
     build_splits,
@@ -80,12 +81,32 @@ def cmd_aggregate(args: argparse.Namespace) -> None:
     runs = Path(args.runs)
     rows = []
     for path in sorted(runs.glob("*/metrics.json")):
+        run_dir = path.parent
         with open(path, "r", encoding="utf-8") as handle:
             metrics = json.load(handle)
+        split = "unknown"
+        manifest_path = run_dir / "manifest.json"
+        if manifest_path.exists():
+            with open(manifest_path, "r", encoding="utf-8") as handle:
+                split = json.load(handle).get("split", "unknown")
+        variants = "unknown"
+        benign_source = "unknown"
+        cfg_path = run_dir / "config.yaml"
+        if cfg_path.exists():
+            with open(cfg_path, "r", encoding="utf-8") as handle:
+                run_cfg = yaml.safe_load(handle) or {}
+            data_cfg = run_cfg.get("data") or {}
+            variants = "+".join(data_cfg.get("variants") or []) or "none"
+            benign_source = data_cfg.get("benign_source", "unknown")
         row = {
             "run_id": metrics["run_id"],
+            "cfg_hash": metrics["run_id"].rsplit("_", 1)[-1],
+            "split": split,
+            "variants": variants,
+            "benign_source": benign_source,
             "fold": metrics["fold"],
             "seed": metrics["seed"],
+            "n_test": metrics.get("n_test", 0),
             "threshold": metrics["threshold"],
             **{f"binary_{k}": v for k, v in metrics["binary"].items()},
             **{f"open_{k}": v for k, v in metrics["open_set"].items()},
@@ -96,7 +117,15 @@ def cmd_aggregate(args: argparse.Namespace) -> None:
     frame = pd.DataFrame(rows)
     out = runs / "summary.parquet"
     frame.to_parquet(out)
-    print(frame.groupby("fold")[["open_auroc", "open_oscr", "binary_f1", "binary_recall"]].mean().round(4).to_string())
+    group_cols = ["cfg_hash", "split", "variants", "benign_source", "fold"]
+    grouped = frame.groupby(group_cols)
+    summary = grouped[["open_auroc", "open_oscr", "binary_f1", "binary_recall"]].mean()
+    summary["n_runs"] = grouped["seed"].count()
+    summary["n_unknown"] = grouped["open_n_unknown"].mean()
+    for col in ("open_auroc", "binary_f1"):
+        std = grouped[col].std(ddof=1).fillna(0.0)
+        summary[f"{col}_ci95"] = 1.96 * std / (summary["n_runs"].clip(lower=1) ** 0.5)
+    print(summary.round(4).to_string())
     print(f"\nwrote {out}")
 
 
@@ -119,12 +148,11 @@ def cmd_gate(args: argparse.Namespace) -> None:
         for fold, spec in payload["folds"].items():
             if spec.get("mode") != "capture":
                 continue
-            roles = spec["roles"]
-            groups = {role: {c for c, r in roles.items() if r == role} for role in ("train", "val", "test")}
-            for left, right in (("train", "val"), ("train", "test"), ("val", "test")):
-                if groups[left] & groups[right]:
-                    leakage_ok = False
-                    detail = f"{path.name}:{fold} {left}/{right} overlap"
+            try:
+                assert_disjoint(spec["roles"])
+            except AssertionError as exc:
+                leakage_ok = False
+                detail = f"{path.name}:{fold} {exc}"
     checks.append(("G5 leakage", leakage_ok, detail))
 
     runs = Path(args.runs)
@@ -137,13 +165,32 @@ def cmd_gate(args: argparse.Namespace) -> None:
     for path in run_dirs:
         with open(path / "metrics.json", "r", encoding="utf-8") as handle:
             metrics = json.load(handle)
-        target = PARITY.get(metrics["fold"])
+        manifest_path = path / "manifest.json"
+        if manifest_path.exists():
+            with open(manifest_path, "r", encoding="utf-8") as handle:
+                manifest = json.load(handle)
+            if manifest.get("split") != "window":
+                continue
+        fold_key = metrics["fold"]
+        variants: list[str] = []
+        if (path / "config.yaml").exists():
+            with open(path / "config.yaml", "r", encoding="utf-8") as handle:
+                run_cfg = yaml.safe_load(handle) or {}
+            variants = (run_cfg.get("data") or {}).get("variants") or []
+        if fold_key == "closed_set":
+            if variants == ["fab"]:
+                fold_key = "closed_set_fab"
+            elif variants == ["mas"]:
+                fold_key = "closed_set_mas"
+        elif fold_key.startswith("leave_one_out/") and variants != ["fab"]:
+            continue
+        target = PARITY.get(fold_key)
         if target is None:
             continue
         observed = metrics["binary"]
         diffs = {k: observed[k] - v for k, v in target.items()}
         ok = all(abs(diffs[k]) <= TOLERANCE[k] for k in target)
-        parity_rows.append((metrics["fold"], metrics["seed"], ok, {k: round(v, 4) for k, v in diffs.items()}))
+        parity_rows.append((fold_key, metrics["seed"], ok, {k: round(v, 4) for k, v in diffs.items()}))
     parity_ok = bool(parity_rows) and all(row[2] for row in parity_rows)
     checks.append(("G7 parity (window split)", parity_ok, f"{len(parity_rows)} matching runs"))
 

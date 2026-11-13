@@ -6,9 +6,11 @@ data:
   window: 300
   stride: 300
   split_seed: 1
+  variants: [fab, mas]
+  benign_source: with_ambient
   raw_node_feat: 13
   edge_feat: 3
-  feature_version: v1
+  feature_version: v2
 
 model:
   encoder: gatv2
@@ -35,11 +37,12 @@ loss:
 train:
   epochs: 330
   phase2_start: 300
+  phase2_mode: joint
   batch_size: 512
   lr: 0.01
   lr_head: 0.0001
   optimizer: adamw
-  weight_decay: 0.0005
+  weight_decay: 0.0001
   scheduler: cosine
   grad_clip: 5.0
   sampler: class_aware

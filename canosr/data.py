@@ -23,7 +23,7 @@ import torch
 from scipy import stats
 from torch_geometric.data import Data
 
-FEATURE_VERSION = "v1"
+FEATURE_VERSION = "v2"
 
 FEATURE_NAMES = [
     "can_id",
@@ -87,7 +87,8 @@ def load_csv_frames(path: str | Path) -> pd.DataFrame:
     )
     for i in range(8):
         out[f"b{i}"] = payload[:, i]
-    return out
+    # the processed CSVs are grouped by CAN ID; the submitted pipeline sorts by time
+    return out.sort_values("t", kind="stable").reset_index(drop=True)
 
 
 def parse_raw_log(path: str | Path) -> tuple[pd.DataFrame, int]:
@@ -123,7 +124,7 @@ def parse_raw_log(path: str | Path) -> tuple[pd.DataFrame, int]:
     )
     for i in range(8):
         df[f"b{i}"] = payload[:, i]
-    return df, skipped
+    return df.sort_values("t", kind="stable").reset_index(drop=True), skipped
 
 
 def add_gaps(df: pd.DataFrame) -> pd.DataFrame:
@@ -277,16 +278,18 @@ def _node_features(
     t: np.ndarray,
     payload: np.ndarray,
     gap: np.ndarray,
-    n_nodes: int,
+    uids: np.ndarray,
 ) -> np.ndarray:
+    """Per-node features. ``can_id``/``t``/``payload``/``gap`` are per message."""
+    n_nodes = len(uids)
     order = np.argsort(can_id, kind="stable")
     ids_sorted = can_id[order]
     t_sorted = t[order]
     p_sorted = payload[order]
     g_sorted = gap[order]
 
-    starts = np.searchsorted(ids_sorted, np.arange(n_nodes), side="left")
-    ends = np.searchsorted(ids_sorted, np.arange(n_nodes), side="right")
+    starts = np.searchsorted(ids_sorted, uids, side="left")
+    ends = np.searchsorted(ids_sorted, uids, side="right")
 
     feats = np.zeros((n_nodes, len(FEATURE_NAMES)), dtype=np.float32)
     for node in range(n_nodes):
@@ -325,7 +328,7 @@ def _node_features(
                 periodicity = float(np.log1p(frequency) / (std_gap / mean_gap + 1e-6))
 
         feats[node] = [
-            float(can_id[lo]),
+            float(uids[node]),
             float(frequency),
             0.0,  # in_degree, filled by caller
             0.0,  # out_degree, filled by caller
@@ -355,7 +358,7 @@ def _window_graph(
         return None
 
     edge_index, edge_attr = _edge_tables(inv, t)
-    feats = _node_features(uids, t, payload, gap, n_nodes)
+    feats = _node_features(can_id, t, payload, gap, uids)
     if edge_index.shape[1]:
         feats[:, 2] = np.bincount(edge_index[1], minlength=n_nodes)
         feats[:, 3] = np.bincount(edge_index[0], minlength=n_nodes)
@@ -365,6 +368,8 @@ def _window_graph(
         edge_index=torch.from_numpy(edge_index.astype(np.int64)),
         edge_attr=torch.from_numpy(edge_attr),
         y=torch.tensor([float(label.max())]),
+        t_start=float(t[0]),
+        t_end=float(t[-1]),
     )
 
 
@@ -443,6 +448,7 @@ class GraphStore:
         self.dataset = dataset
         self.window = window
         self.stride = stride
+        self.fingerprint = load_captures(dataset, data_root)["fingerprint"]
 
     def _path(self, capture_id: str) -> Path:
         return self.dir / f"{capture_id.replace('/', '__')}.pt"
@@ -452,6 +458,15 @@ class GraphStore:
 
     def load_capture(self, capture_id: str) -> list[Data]:
         payload = torch.load(self._path(capture_id), weights_only=False)
+        if payload.get("feature_version") != FEATURE_VERSION:
+            raise RuntimeError(
+                f"{capture_id}: cached feature_version {payload.get('feature_version')!r} "
+                f"!= {FEATURE_VERSION!r}; rerun build-graphs --force"
+            )
+        if payload.get("fingerprint") != self.fingerprint:
+            raise RuntimeError(
+                f"{capture_id}: capture fingerprint changed; rerun build-captures and build-graphs --force"
+            )
         graphs = payload["graphs"]
         for graph in graphs:
             graph.capture_id = capture_id
@@ -465,6 +480,12 @@ class GraphStore:
 
 
 # -------------------------------------------------------------------------- splits
+
+
+def recording_id(capture_id: str) -> str:
+    """Strip variant prefix and ``_masquerade`` suffix to get the underlying recording id."""
+    base = capture_id.split("/", 1)[1] if "/" in capture_id else capture_id
+    return base.removesuffix("_masquerade")
 
 
 def _role_split(captures: list[dict], seed: int) -> dict[str, str]:
@@ -530,10 +551,17 @@ def _capture_fold(captures: list[dict], holdout: str | None, seed: int) -> dict:
     for capture in captures:
         if capture["id"] in roles:
             continue
-        groups[capture["attack"] or "__benign__"].append(capture)
+        key = capture["attack"] if capture["attack"] else "__benign__"
+        groups[key].append(capture)
 
     for key in sorted(groups):
-        roles.update(_role_split(groups[key], seed + _stable_int(key)))
+        by_rec: dict[str, list[dict]] = defaultdict(list)
+        for capture in groups[key]:
+            by_rec[recording_id(capture["id"])].append(capture)
+        rec_roles = _role_split([{"id": rec} for rec in sorted(by_rec)], seed + _stable_int(key))
+        for rec, role in rec_roles.items():
+            for capture in by_rec[rec]:
+                roles[capture["id"]] = role
 
     return {"mode": "capture", "holdout": holdout, "roles": dict(sorted(roles.items()))}
 
@@ -549,17 +577,17 @@ def load_splits(dataset: str, data_root: str | Path, split: str, seed: int) -> d
 
 
 def assert_disjoint(roles: dict[str, str]) -> None:
-    """Hard failure if a capture appears in more than one role."""
-    seen: dict[str, str] = {}
+    """Hard failure if any role is invalid or any underlying recording appears in multiple roles."""
+    valid_roles = {"train", "val", "test"}
+    sets: dict[str, set[str]] = {r: set() for r in valid_roles}
     for capture_id, role in roles.items():
-        if capture_id in seen:
-            raise AssertionError(f"capture {capture_id} assigned twice: {seen[capture_id]} and {role}")
-        seen[capture_id] = role
-    sets = {role: {c for c, r in roles.items() if r == role} for role in ("train", "val", "test")}
+        if role not in valid_roles:
+            raise AssertionError(f"capture {capture_id} has invalid role {role!r}")
+        sets[role].add(recording_id(capture_id))
     for left, right in (("train", "val"), ("train", "test"), ("val", "test")):
         overlap = sets[left] & sets[right]
         if overlap:
-            raise AssertionError(f"{left}/{right} overlap: {sorted(overlap)[:5]}")
+            raise AssertionError(f"{left}/{right} recording overlap: {sorted(overlap)[:5]}")
 
 
 def iter_windows(df: pd.DataFrame, window: int, stride: int) -> Iterator[pd.DataFrame]:

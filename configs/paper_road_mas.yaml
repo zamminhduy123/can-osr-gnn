@@ -1,0 +1,66 @@
+dataset: road
+split: capture
+seed: 1
+
+data:
+  window: 300
+  stride: 300
+  split_seed: 1
+  variants: [mas]
+  benign_source: attack_only
+  raw_node_feat: 13
+  edge_feat: 3
+  feature_version: v2
+
+model:
+  encoder: gatv2
+  head: prototype
+  hidden: 8
+  heads: 5
+  layers: 2
+  dropout: 0.3
+  projection: 8
+  readout: attn
+  id_embedding: false
+  id_in_recon: false
+
+loss:
+  supcon: supcon
+  temperature: 0.05
+  w_supcon: 2.0
+  w_node: 0.5
+  w_adj: 0.7
+  w_ce: 1.0
+  recon_on_benign_only: true
+  adj_pos_weight: auto
+
+train:
+  epochs: 330
+  phase2_start: 300
+  phase2_mode: joint
+  batch_size: 512
+  lr: 0.01
+  lr_head: 0.0001
+  optimizer: adamw
+  weight_decay: 0.0001
+  scheduler: cosine
+  grad_clip: 5.0
+  sampler: class_aware
+  num_workers: 0
+
+osr:
+  scorer: fused
+  channels: [proto, node, adj]
+  weights: null
+  threshold_quantile: 0.95
+  fit_weights: false
+
+eval:
+  every: 10
+  select_metric: macro_f1
+
+run:
+  device: cuda
+  amp: false
+  force: false
+  limit: 0
